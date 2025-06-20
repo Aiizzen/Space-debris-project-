@@ -1,0 +1,73 @@
+# Streamlit App: Space Debris Detection and Tracking
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
+from pykalman import KalmanFilter
+
+st.set_page_config(page_title="Space Debris Detection & Tracking", layout="wide")
+st.title("🚀 Space Debris Detection and Tracking ")
+
+# Sidebar: Upload Dataset
+st.sidebar.header("Upload Dataset")
+uploaded_file = st.sidebar.file_uploader("Upload a CSV file with space object data", type=["csv"])
+
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    st.subheader("Raw Data")
+    st.write(df.head())
+
+    # Preprocessing
+    required_columns = ['PERIGEE', 'APOGEE', 'INCLINATION', 'LAUNCH_YEAR', 'OBJECT_TYPE']
+    if all(col in df.columns for col in required_columns):
+        df = df.dropna(subset=required_columns)
+        df['is_debris'] = df['OBJECT_TYPE'].apply(lambda x: 1 if x.strip().upper() == 'DEBRIS' else 0)
+
+        # ML Classification
+        X = df[['PERIGEE', 'APOGEE', 'INCLINATION', 'LAUNCH_YEAR']]
+        y = df['is_debris']
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        model = RandomForestClassifier(n_estimators=100)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+
+        st.subheader("🌟 Classification Results")
+        st.text(classification_report(y_test, y_pred))
+
+        df['Prediction'] = model.predict(X)
+        st.write("Debris Prediction Summary:")
+        st.write(df[['OBJECT_TYPE', 'Prediction']].head())
+
+        # Tracker Simulation
+        st.subheader("🌐 Trajectory Simulation")
+        num_points = 100
+        timestamps = pd.date_range(start="2024-01-01", periods=num_points, freq='D')
+        x = np.cumsum(np.random.randn(num_points))
+        y = np.cumsum(np.random.randn(num_points))
+        pos_df = pd.DataFrame({'timestamp': timestamps, 'x': x, 'y': y})
+
+        kf = KalmanFilter(initial_state_mean=[0, 0], n_dim_obs=2)
+        state_means, _ = kf.filter(pos_df[['x', 'y']].values)
+        pos_df['x_kalman'] = state_means[:, 0]
+        pos_df['y_kalman'] = state_means[:, 1]
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(pos_df['x'], pos_df['y'], label='Original Path', linestyle='--', alpha=0.5)
+        ax.plot(pos_df['x_kalman'], pos_df['y_kalman'], label='Kalman Smoothed Path', color='red')
+        ax.set_title("Simulated Satellite Motion")
+        ax.set_xlabel("X Position")
+        ax.set_ylabel("Y Position")
+        ax.legend()
+        st.pyplot(fig)
+    else:
+        st.error("The uploaded CSV must contain the following columns: PERIGEE, APOGEE, INCLINATION, LAUNCH_YEAR, OBJECT_TYPE")
+else:
+    st.info("Please upload a dataset to get started.")
+
+st.sidebar.markdown("---")
+st.sidebar.info("Developed by Jayant chaudhary ")
