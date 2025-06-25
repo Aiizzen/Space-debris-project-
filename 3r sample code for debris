@@ -1,0 +1,115 @@
+import streamlit as st
+from datetime import datetime
+from spacetrack import SpaceTrackClient
+from skyfield.api import load, EarthSatellite
+import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
+
+# -- Page config / auto-refresh --
+st.set_page_config(page_title="Real-Time Debris Tracker", layout="wide")
+st_autorefresh(interval=15_000, key="refresh")
+st.title("🛰️ Real-Time Space Debris Tracker")
+
+# -- Load credentials --
+username = st.secrets["space_track_username"]
+password = st.secrets["space_track_password"]
+
+# -- Fetch TLEs --
+@st.cache_data(ttl=3600)
+def fetch_debris_tles(user, pwd):
+    try:
+        with SpaceTrackClient(identity=user, password=pwd) as client:
+            lines = client.gp(epoch=">now-1", format="tle")
+        tles = [(lines[i], lines[i+1]) for i in range(0, len(lines), 2)]
+        return tles[:10]  # limit to first 10 debris objects
+    except Exception as e:
+        st.error(f"❌ Space‑Track error: {e}")
+        return []
+
+tles = fetch_debris_tles(username, password)
+if not tles:
+    st.stop()
+
+# -- Compute current time and Timescale --
+ts = load.timescale()
+now = datetime.utcnow()
+t = ts.utc(now.year, now.month, now.day, now.hour, now.minute, now.second)
+
+# -- Center globe on first debris object --
+name0, l10, l20 = "Debris 1", *tles[0]
+sat0 = EarthSatellite(l10, l20, "Debris 1", ts)
+sub0 = sat0.at(t).subpoint()
+center_lon = sub0.longitude.degrees
+
+# -- Plot 3D globe with trails --
+fig3d = go.Figure()
+for i, (l1, l2) in enumerate(tles, start=1):
+    sat = EarthSatellite(l1, l2, f"Debris {i}", ts)
+    sp = sat.at(t).subpoint()
+    lat, lon = sp.latitude.degrees, sp.longitude.degrees
+
+    trail = []
+    for m in range(-15, 16, 2):
+        spm = sat.at(ts.utc(now.year, now.month, now.day, now.hour, now.minute + m)).subpoint()
+        trail.append((spm.longitude.degrees, spm.latitude.degrees))
+    lons, lats = zip(*trail)
+
+    fig3d.add_trace(go.Scattergeo(
+        lon=[lon], lat=[lat],
+        mode="markers",
+        marker=dict(size=6, color="red"),
+        name=f"Debris {i}"
+    ))
+    fig3d.add_trace(go.Scattergeo(
+        lon=lons, lat=lats,
+        mode="lines",
+        line=dict(width=1, color="cyan"),
+        showlegend=False
+    ))
+
+fig3d.update_geos(
+    projection_type="orthographic",
+    projection_rotation=dict(lon=center_lon),
+    showland=True, landcolor="rgb(25,25,25)",
+    showocean=True, oceancolor="rgb(0,0,40)",
+    showcountries=True, bgcolor="black"
+)
+fig3d.update_layout(
+    title="🌍 3D Globe Debris Tracker",
+    paper_bgcolor="black", font_color="white",
+    height=600, margin=dict(l=0, r=0, t=30, b=0)
+)
+
+# -- 2D Path map --
+fig2d = go.Figure()
+for i, (l1, l2) in enumerate(tles, start=1):
+    sat = EarthSatellite(l1, l2, f"Debris {i}", ts)
+    trail = []
+    for m in range(-15, 16, 2):
+        spm = sat.at(ts.utc(now.year, now.month, now.day, now.hour, now.minute + m)).subpoint()
+        trail.append((spm.longitude.degrees, spm.latitude.degrees))
+    lons, lats = zip(*trail)
+    fig2d.add_trace(go.Scattergeo(
+        lon=lons, lat=lats,
+        mode="lines+markers",
+        marker=dict(size=4, color="yellow"),
+        line=dict(color="orange"),
+        name=f"Debris {i}"
+    ))
+
+fig2d.update_geos(
+    projection_type="natural earth",
+    showland=True, landcolor="rgb(30,30,30)",
+    showocean=True, oceancolor="rgb(0,0,50)",
+    bgcolor="black"
+)
+fig2d.update_layout(
+    title="🗺️ 2D Debris Paths",
+    paper_bgcolor="black", font_color="white",
+    height=500, margin=dict(l=0, r=0, t=30, b=0)
+)
+
+# -- Display both plots --
+st.plotly_chart(fig3d, use_container_width=True)
+st.plotly_chart(fig2d, use_container_width=True)
+st.caption(f"Last updated: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
