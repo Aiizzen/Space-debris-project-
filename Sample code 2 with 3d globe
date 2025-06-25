@@ -1,0 +1,119 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+from skyfield.api import load, EarthSatellite
+from pykalman import KalmanFilter
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+
+# --- Page Setup ---
+st.set_page_config(page_title="Space Debris Tracker", layout="wide", page_icon="🛰️")
+st.title("🛰️ Real Satellite Tracking (Globe + 2D View)")
+
+@st.cache_data(show_spinner=False)
+def fetch_satellite_track():
+    try:
+        tle_url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle"
+        response = requests.get(tle_url)
+        lines = response.text.strip().splitlines()
+
+        # Find first valid 3-line TLE set
+        for i in range(len(lines) - 2):
+            name = lines[i].strip()
+            line1 = lines[i + 1].strip()
+            line2 = lines[i + 2].strip()
+            if line1.startswith("1 ") and line2.startswith("2 "):
+                break
+        else:
+            return None, "No valid TLE set found"
+
+        ts = load.timescale()
+        satellite = EarthSatellite(line1, line2, name, ts)
+
+        # Simulate 100 days
+        times = ts.utc(2024, 1, range(1, 101))
+        lats, lons = [], []
+        for t in times:
+            subpoint = satellite.at(t).subpoint()
+            lats.append(subpoint.latitude.degrees)
+            lons.append(subpoint.longitude.degrees)
+
+        df = pd.DataFrame({
+            'timestamp': pd.date_range(start='2024-01-01', periods=100, freq='D'),
+            'x': lons,
+            'y': lats
+        })
+        return df, name
+
+    except Exception as e:
+        return None, f"Exception: {e}"
+
+# --- Fetch and Display ---
+motion_df, name = fetch_satellite_track()
+
+if motion_df is not None:
+    st.success(f"✅ Tracking satellite: {name}")
+
+    # Apply Kalman Filter
+    kf = KalmanFilter(initial_state_mean=[motion_df['x'][0], motion_df['y'][0]], n_dim_obs=2)
+    state_means, _ = kf.filter(motion_df[['x', 'y']].values)
+    motion_df['x_kalman'] = state_means[:, 0]
+    motion_df['y_kalman'] = state_means[:, 1]
+
+    # --- Plotly Globe View ---
+    st.subheader("🌐 Orbit Path (Interactive Globe)")
+    fig_globe = go.Figure()
+
+    fig_globe.add_trace(go.Scattergeo(
+        lon = motion_df['x'],
+        lat = motion_df['y'],
+        mode = 'lines+markers',
+        name = 'Raw Path',
+        line = dict(width=1, color='blue'),
+        marker = dict(size=3, color='blue')
+    ))
+
+    fig_globe.add_trace(go.Scattergeo(
+        lon = motion_df['x_kalman'],
+        lat = motion_df['y_kalman'],
+        mode = 'lines',
+        name = 'Smoothed Path (Kalman)',
+        line = dict(width=2, color='red')
+    ))
+
+    fig_globe.update_geos(
+        projection_type="orthographic",
+        showcountries=True,
+        showcoastlines=True,
+        landcolor="rgb(30,30,30)",
+        oceancolor="rgb(10,10,40)",
+        showocean=True,
+        bgcolor='black'
+    )
+
+    fig_globe.update_layout(
+        height=600,
+        paper_bgcolor='black',
+        font=dict(color='white'),
+        margin={"r":0,"t":40,"l":0,"b":0}
+    )
+
+    st.plotly_chart(fig_globe, use_container_width=True)
+
+    # --- Matplotlib 2D Plot ---
+    st.subheader("📈 2D Orbit View (Longitude vs Latitude)")
+    fig2d, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(motion_df['x'], motion_df['y'], '--', alpha=0.5, label='Raw Path')
+    ax.plot(motion_df['x_kalman'], motion_df['y_kalman'], 'r-', label='Smoothed Path')
+    ax.set_title(f"2D Path: {name}", color='white')
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.legend()
+    ax.set_facecolor('#1a1a1a')
+    fig2d.patch.set_facecolor('#1a1a1a')
+    ax.tick_params(colors='white')
+    st.pyplot(fig2d)
+
+else:
+    st.error(f"❌ Could not load satellite data. Reason: {name}")
