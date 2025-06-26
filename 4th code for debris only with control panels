@@ -1,0 +1,186 @@
+import math
+from datetime import datetime, timedelta, timezone
+
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+from spacetrack import SpaceTrackClient
+from skyfield.api import load, EarthSatellite
+import plotly.graph_objects as go
+
+
+# ──────────────────────────────────────
+#  Page config + dark-glass styling
+# ──────────────────────────────────────
+st.set_page_config("🛰️ Real-Time Debris Tracker", layout="wide")
+st.markdown(
+    """
+    <style>
+    body {background:#0b0d13;color:#ddd;}
+    .stSlider > div div{color:#ddd}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.title("🛰️ Real-Time Space Debris Tracker")
+
+
+# ──────────────────────────────────────
+#  Sidebar controls
+# ──────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Controls")
+    max_keep   = st.slider("Max debris shown",   5, 40, 15)
+    trail_min  = st.slider("Trail ± minutes",    5, 60, 20, step=5)
+    refresh_s  = st.slider("Auto-refresh (sec)", 5, 120, 30)
+    st_autorefresh(interval=refresh_s * 1000, key="auto")
+
+
+# ──────────────────────────────────────
+#  Time & Skyfield
+# ──────────────────────────────────────
+ts      = load.timescale()
+now_dt  = datetime.now(timezone.utc)        # timezone-aware
+t_now   = ts.utc(now_dt)
+
+# ──────────────────────────────────────
+#  Load secrets
+# ──────────────────────────────────────
+try:
+    creds = st.secrets["space_track"]
+    USER, PASS = creds["username"], creds["password"]
+except Exception:
+    st.error("❌  Add Space-Track creds in `.streamlit/secrets.toml`")
+    st.stop()
+
+
+# ──────────────────────────────────────
+#  Fetch & validate debris TLEs
+# ──────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner="🔄 Loading debris TLEs…")
+def fetch_valid_debris(user: str, pwd: str,
+                       days_back: int, keep: int):
+    """Return up to `keep` debris TLE pairs with finite sub-points."""
+    cl = SpaceTrackClient(identity=user, password=pwd)
+
+    raw = cl.gp(
+        epoch=f">now-{days_back}",
+        object_type="DEBRIS",
+        orderby="epoch desc",
+        limit=500,
+        format="tle",
+    )
+    # Split into line pairs
+    lines = raw.splitlines()
+    pairs = [(lines[i], lines[i + 1]) for i in range(0, len(lines) - 1, 2)]
+
+    good, rejected = [], 0
+    for l1, l2 in pairs:
+        try:
+            sat = EarthSatellite(l1, l2, None, ts)
+            sub = sat.at(t_now).subpoint()
+            if math.isfinite(sub.latitude.degrees) and math.isfinite(sub.longitude.degrees):
+                good.append((sat.name or f"Debris {len(good)+1}", l1, l2))
+            else:
+                rejected += 1
+        except Exception:
+            rejected += 1
+        if len(good) >= keep:
+            break
+    return good, rejected
+
+
+tles, rejected = fetch_valid_debris(USER, PASS, days_back=7, keep=max_keep)
+
+if not tles:
+    st.warning("⚠️  No valid debris right now – try again later.")
+    st.stop()
+
+st.success(f"✅ Loaded {len(tles)} debris • Rejected {rejected}")
+
+# ──────────────────────────────────────
+#  Helper: add marker + trail
+# ──────────────────────────────────────
+def add_trail(fig, satellite, minutes, color_line, color_dot):
+    sub0 = satellite.at(t_now).subpoint()
+    lat0, lon0 = sub0.latitude.degrees, sub0.longitude.degrees
+
+    # Current marker
+    fig.add_trace(go.Scattergeo(
+        lon=[lon0], lat=[lat0],
+        mode="markers",
+        marker=dict(size=7, color=color_dot),
+        name=satellite.name or "Debris",
+    ))
+
+    # Trail
+    lats, lons = [], []
+    for m in range(-minutes, minutes + 1, 2):
+        tt = ts.utc(now_dt + timedelta(minutes=m))
+        sub = satellite.at(tt).subpoint()
+        lats.append(sub.latitude.degrees)
+        lons.append(sub.longitude.degrees)
+
+    fig.add_trace(go.Scattergeo(
+        lon=lons, lat=lats,
+        mode="lines",
+        line=dict(width=1.2, color=color_line),
+        showlegend=False,
+    ))
+
+
+# ──────────────────────────────────────
+#  Build plots
+# ──────────────────────────────────────
+center_lon = EarthSatellite(tles[0][1], tles[0][2], tles[0][0], ts)\
+             .at(t_now).subpoint().longitude.degrees
+
+# Globe 3-D
+fig3d = go.Figure()
+for name, l1, l2 in tles:
+    add_trail(fig3d, EarthSatellite(l1, l2, name, ts),
+              trail_min, "cyan", "red")
+
+fig3d.update_geos(
+    projection_type="orthographic",
+    projection_rotation=dict(lon=center_lon),
+    landcolor="rgb(35,35,35)",
+    oceancolor="rgb(0,10,50)",
+    showland=True, showocean=True,
+    bgcolor="black",
+)
+fig3d.update_layout(
+    paper_bgcolor="black", font_color="white",
+    margin=dict(l=0, r=0, t=0, b=0), height=620,
+)
+
+# Map 2-D
+fig2d = go.Figure()
+for name, l1, l2 in tles:
+    add_trail(fig2d, EarthSatellite(l1, l2, name, ts),
+              trail_min, "orange", "yellow")
+
+fig2d.update_geos(
+    projection_type="natural earth",
+    landcolor="rgb(45,45,45)",
+    oceancolor="rgb(0,0,60)",
+    showland=True, showocean=True,
+    bgcolor="black",
+)
+fig2d.update_layout(
+    paper_bgcolor="black", font_color="white",
+    height=560, margin=dict(l=0, r=0, t=0, b=0),
+)
+
+# ──────────────────────────────────────
+#  Tabs layout
+# ──────────────────────────────────────
+tab3d, tab2d = st.tabs(["🌍 3-D Globe", "🗺 2-D Map"])
+with tab3d:
+    st.plotly_chart(fig3d, use_container_width=True)
+with tab2d:
+    st.plotly_chart(fig2d, use_container_width=True)
+
+st.caption(
+    f"⏱ Updated {now_dt:%Y-%m-%d %H:%M:%S UTC} • "
+    f"Trail ±{trail_min} min • Refresh {refresh_s}s"
+)
