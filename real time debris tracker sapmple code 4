@@ -1,0 +1,134 @@
+import streamlit as st
+from datetime import datetime, timedelta
+from spacetrack import SpaceTrackClient
+from skyfield.api import load, EarthSatellite, utc
+import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
+
+# Configure Streamlit page
+st.set_page_config(page_title="Real-Time Debris Tracker", layout="wide")
+st.title("🛰️ Real-Time Space Debris Tracker (Valid TLEs Only)")
+st_autorefresh(interval=15000, key="refresh")
+
+# Set up Skyfield timescale and current UTC time
+ts = load.timescale()
+now = datetime.utcnow().replace(tzinfo=utc)
+t = ts.utc(now)
+
+# Load Space-Track credentials from secrets
+username = st.secrets["space_track"]["username"]
+password = st.secrets["space_track"]["password"]
+
+# Fetch latest debris TLEs from Space-Track
+@st.cache_data(ttl=3600)
+def fetch_debris_tles(user, pwd):
+    try:
+        client = SpaceTrackClient(identity=user, password=pwd)
+        tle_text = client.tle_latest(norad_cat_id=">", ordinal=1, format="tle", object_type="DEBRIS")
+        lines = tle_text.splitlines()
+        tles = [(lines[i], lines[i+1]) for i in range(0, len(lines)-1, 2)]
+        return tles[:10]  # Limit to first 10 debris
+    except Exception as e:
+        st.error(f"❌ Space-Track error: {e}")
+        return []
+
+tles = fetch_debris_tles(username, password)
+
+if not tles:
+    st.warning("⚠️ No valid debris found (TLEs may be missing or decayed). Try again later.")
+    st.stop()
+
+# Set up center position based on first debris
+first_sat = EarthSatellite(tles[0][0], tles[0][1], "Debris 1", ts)
+center_lon = first_sat.at(t).subpoint().longitude.degrees
+
+# 🌍 3D Globe Visualization
+fig3d = go.Figure()
+for i, (l1, l2) in enumerate(tles, 1):
+    try:
+        sat = EarthSatellite(l1, l2, f"Debris {i}", ts)
+        sp = sat.at(t).subpoint()
+        lat, lon = sp.latitude.degrees, sp.longitude.degrees
+
+        # Trail
+        trail = []
+        for offset in range(-15, 16, 2):
+            tm = ts.utc((now + timedelta(minutes=offset)).replace(tzinfo=utc))
+            subp = sat.at(tm).subpoint()
+            trail.append((subp.longitude.degrees, subp.latitude.degrees))
+        lons, lats = zip(*trail)
+
+        fig3d.add_trace(go.Scattergeo(
+            lon=[lon], lat=[lat],
+            mode="markers",
+            marker=dict(size=8, color="red"),
+            name=f"Debris {i}"
+        ))
+        fig3d.add_trace(go.Scattergeo(
+            lon=lons, lat=lats,
+            mode="lines",
+            line=dict(width=1, color="cyan"),
+            showlegend=False
+        ))
+    except:
+        continue
+
+fig3d.update_geos(
+    projection_type="orthographic",
+    projection_rotation=dict(lon=center_lon),
+    showland=True,
+    landcolor="gray",
+    showocean=True,
+    oceancolor="darkblue",
+    bgcolor="black"
+)
+fig3d.update_layout(
+    title="🌍 3D Globe - Space Debris",
+    paper_bgcolor="black",
+    font_color="white",
+    height=600
+)
+
+# 🗺️ 2D Map
+fig2d = go.Figure()
+for i, (l1, l2) in enumerate(tles, 1):
+    try:
+        sat = EarthSatellite(l1, l2, f"Debris {i}", ts)
+        trail = []
+        for offset in range(-15, 16, 2):
+            tm = ts.utc((now + timedelta(minutes=offset)).replace(tzinfo=utc))
+            subp = sat.at(tm).subpoint()
+            trail.append((subp.longitude.degrees, subp.latitude.degrees))
+        lons, lats = zip(*trail)
+
+        fig2d.add_trace(go.Scattergeo(
+            lon=lons, lat=lats,
+            mode="lines+markers",
+            marker=dict(size=4, color="yellow"),
+            line=dict(color="orange"),
+            name=f"Debris {i}"
+        ))
+    except:
+        continue
+
+fig2d.update_geos(
+    projection_type="natural earth",
+    showland=True,
+    landcolor="dimgray",
+    showocean=True,
+    oceancolor="midnightblue",
+    bgcolor="black"
+)
+fig2d.update_layout(
+    title="🗺️ 2D Path - Space Debris",
+    paper_bgcolor="black",
+    font_color="white",
+    height=500
+)
+
+# Display Charts
+st.plotly_chart(fig3d, use_container_width=True)
+st.plotly_chart(fig2d, use_container_width=True)
+
+# Timestamp
+st.caption(f"Last updated: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
